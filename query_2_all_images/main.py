@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an XQL query that returns the latest inventory row for every host."""
+"""Run an XQL query that returns image assets from the asset inventory."""
 
 from __future__ import annotations
 
@@ -113,9 +113,12 @@ class CortexXqlClient:
             time.sleep(poll_interval)
 
 
-QUERY = """dataset = host_inventory
-| dedup host_name by desc _time
-| fields host_name, agent_id, os_type, os_caption, ip_addresses, manufacturer, model, serial_number
+QUERY = """config case_sensitive = false
+| dataset = asset_inventory
+| filter xdm.asset.type.class = "Compute"
+| filter (xdm.asset.type.id = "CORE_IMAGE" or xdm.asset.type.id = "RUNTIME_IMAGE")
+| fields xdm.asset.id as image_id, xdm.asset.name as image_name, xdm.asset.type.id as image_type_id, xdm.asset.type.name as image_type
+| sort asc image_name
 | limit 1000"""
 
 

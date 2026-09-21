@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run an XQL query that returns the latest inventory row for every host."""
+"""Print up to five host names suitable for the host-CVE example.
+
+The values come from ``va_endpoints.endpoint_name``, which is the exact field
+accepted by ``query_3_cves_for_host``. The dataset represents endpoints known
+to the vulnerability service; it does not guarantee live network reachability.
+"""
 
 from __future__ import annotations
 
@@ -113,14 +118,16 @@ class CortexXqlClient:
             time.sleep(poll_interval)
 
 
-QUERY = """dataset = host_inventory
-| dedup host_name by desc _time
-| fields host_name, agent_id, os_type, os_caption, ip_addresses, manufacturer, model, serial_number
-| limit 1000"""
+QUERY = """config case_sensitive = false
+| dataset = va_endpoints
+| filter endpoint_name != null
+| fields endpoint_name
+| limit 100"""
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--count", type=int, default=5, help="Number of host names to print (default: 5)")
     parser.add_argument("--limit", type=int, default=1000, help="Maximum rows requested (default: 1000)")
     parser.add_argument(
         "--relative-time-ms",
@@ -141,8 +148,8 @@ def main() -> int:
     if not base_url or not api_key or not api_key_id:
         print("Set CORTEX_API_URL, CORTEX_API_KEY, and CORTEX_API_KEY_ID first.", file=sys.stderr)
         return 2
-    if args.limit <= 0 or args.relative_time_ms <= 0:
-        print("--limit and --relative-time-ms must be positive.", file=sys.stderr)
+    if args.count <= 0 or args.limit <= 0 or args.relative_time_ms <= 0:
+        print("--count, --limit, and --relative-time-ms must be positive.", file=sys.stderr)
         return 2
 
     try:
@@ -159,9 +166,30 @@ def main() -> int:
         return 1
     reply = result.get("reply", {})
     rows = reply.get("results", {}).get("data") if isinstance(reply, dict) else None
-    # XQL rows are nested under reply.results.data; do not confuse the
-    # surrounding quota/status metadata with the query result set.
-    print(json.dumps(result if rows is None else rows, indent=2, sort_keys=True, default=str))
+    if rows is None:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0
+
+    host_names: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        host_name = row.get("endpoint_name")
+        if host_name is None or not str(host_name).strip() or str(host_name) in seen:
+            continue
+        seen.add(str(host_name))
+        host_names.append(str(host_name))
+        if len(host_names) >= args.count:
+            break
+
+    if len(host_names) < args.count:
+        print(
+            f"Warning: found {len(host_names)} host(s) in va_endpoints; requested {args.count}. "
+            "The tenant may not expose endpoint vulnerability data or may have fewer known hosts.",
+            file=sys.stderr,
+        )
+    print(json.dumps(host_names, indent=2))
     return 0
 
 
