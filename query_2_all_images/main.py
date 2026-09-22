@@ -39,7 +39,9 @@ class CortexXqlClient:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise CortexApiError(f"Cortex API returned HTTP {exc.code}: {detail}") from exc
+            raise CortexApiError(
+                f"Cortex API returned HTTP {exc.code}: {detail}"
+            ) from exc
         except URLError as exc:
             raise CortexApiError(f"Could not reach Cortex API: {exc.reason}") from exc
 
@@ -86,7 +88,11 @@ class CortexXqlClient:
         else:
             query_id = None
         if not query_id:
-            raise CortexApiError(f"Start XQL response did not contain a query ID: {started}")
+            raise CortexApiError(
+                f"Start XQL response did not contain a query ID: {started}"
+            )
+
+            # get docs for what causes streaming (over size)
 
         deadline = time.monotonic() + timeout
         while True:
@@ -106,7 +112,10 @@ class CortexXqlClient:
                 status = str(reply.get("status", "")).upper()
                 if status in {"SUCCESS", "COMPLETED", "FAILED", "ERROR"}:
                     return result
-                if status not in {"PENDING", "RUNNING", "IN_PROGRESS"} and "results" in reply:
+                if (
+                    status not in {"PENDING", "RUNNING", "IN_PROGRESS"}
+                    and "results" in reply
+                ):
                     return result
             if time.monotonic() >= deadline:
                 raise CortexApiError(f"Timed out waiting for query {query_id}")
@@ -124,15 +133,21 @@ QUERY = """config case_sensitive = false
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--limit", type=int, default=1000, help="Maximum rows requested (default: 1000)")
+    parser.add_argument(
+        "--limit", type=int, default=1000, help="Maximum rows requested (default: 1000)"
+    )
     parser.add_argument(
         "--relative-time-ms",
         type=int,
         default=2_592_000_000,
         help="API timeframe in milliseconds (default: last 30 days)",
     )
-    parser.add_argument("--timeout", type=float, default=300, help="Result polling timeout in seconds")
-    parser.add_argument("--poll-interval", type=float, default=2, help="Seconds between result polls")
+    parser.add_argument(
+        "--timeout", type=float, default=300, help="Result polling timeout in seconds"
+    )
+    parser.add_argument(
+        "--poll-interval", type=float, default=2, help="Seconds between result polls"
+    )
     return parser.parse_args()
 
 
@@ -142,7 +157,10 @@ def main() -> int:
     api_key = os.getenv("CORTEX_API_KEY")
     api_key_id = os.getenv("CORTEX_API_KEY_ID")
     if not base_url or not api_key or not api_key_id:
-        print("Set CORTEX_API_URL, CORTEX_API_KEY, and CORTEX_API_KEY_ID first.", file=sys.stderr)
+        print(
+            "Set CORTEX_API_URL, CORTEX_API_KEY, and CORTEX_API_KEY_ID first.",
+            file=sys.stderr,
+        )
         return 2
     if args.limit <= 0 or args.relative_time_ms <= 0:
         print("--limit and --relative-time-ms must be positive.", file=sys.stderr)
@@ -164,7 +182,11 @@ def main() -> int:
     rows = reply.get("results", {}).get("data") if isinstance(reply, dict) else None
     # XQL rows are nested under reply.results.data; do not confuse the
     # surrounding quota/status metadata with the query result set.
-    print(json.dumps(result if rows is None else rows, indent=2, sort_keys=True, default=str))
+    print(
+        json.dumps(
+            result if rows is None else rows, indent=2, sort_keys=True, default=str
+        )
+    )
     return 0
 
 
