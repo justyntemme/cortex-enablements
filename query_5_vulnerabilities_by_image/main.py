@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an XQL query that returns findings for one container image identifier."""
+"""Run an XQL query that returns findings for one image asset ID."""
 
 from __future__ import annotations
 
@@ -68,15 +68,15 @@ def xql_string(value: str) -> str:
 
 def build_query(image_id: str) -> str:
     return f'''dataset = uvm_findings
-| filter image = "{xql_string(image_id)}" and vulnerability_id != null
-| fields image, image_name, asset_id, asset_name, asset_type, vulnerability_id, cve_description, cvss_score, cvss_severity, epss_score, exploitable, fix_available, fix_versions, affected_software, first_observed, last_observed
+| filter asset_id = "{xql_string(image_id)}" and vulnerability_id != null
+| fields asset_id, asset_name, asset_type, image, image_name, vulnerability_id, cve_description, cvss_score, cvss_severity, epss_score, exploitable, fix_available, fix_versions, affected_software, first_observed, last_observed
 | sort asc vulnerability_id
 | limit 1000'''
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image-id", required=True, help="Container image identifier stored in uvm_findings.image")
+    parser.add_argument("--image-id", required=True, help="Image asset ID stored in uvm_findings.asset_id")
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--relative-time-ms", type=int, default=2_592_000_000, help="API timeframe in milliseconds (default: last 30 days)")
     parser.add_argument("--timeout", type=float, default=300)
