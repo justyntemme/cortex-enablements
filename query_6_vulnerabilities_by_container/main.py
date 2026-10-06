@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an XQL query that returns findings for one container asset ID."""
+"""Run an XQL query that returns findings for a container image name or digest."""
 
 from __future__ import annotations
 
@@ -66,17 +66,23 @@ def xql_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def build_query(container_id: str) -> str:
+def build_query(asset_name: str) -> str:
     return f'''dataset = uvm_findings
-| filter asset_id = "{xql_string(container_id)}" and vulnerability_id != null
-| fields asset_id, asset_name, asset_type, image, image_name, vulnerability_id, cve_description, cvss_score, cvss_severity, epss_score, exploitable, fix_available, fix_versions, affected_software, first_observed, last_observed
+| filter asset_name = "{xql_string(asset_name)}" and vulnerability_id != null
+| fields asset_name, vulnerability_id, cvss_score, cvss_severity, affected_software, package_version, package_type, os_distribution, file_path, first_observed, cve_publish_date, last_observed, fix_available, fix_versions, remediation, cortex_vulnerability_risk_score, exploitable, epss_score, cve_risk_factors, exploit_level
 | sort asc vulnerability_id
 | limit 1000'''
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--container-id", required=True, help="Container asset ID stored in uvm_findings.asset_id")
+    parser.add_argument(
+        "--asset-name",
+        "--container-id",
+        dest="asset_name",
+        required=True,
+        help="Container image name or digest stored in uvm_findings.asset_name",
+    )
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--relative-time-ms", type=int, default=2_592_000_000, help="API timeframe in milliseconds (default: last 30 days)")
     parser.add_argument("--timeout", type=float, default=300)
@@ -89,7 +95,7 @@ def main() -> int:
         print("Set CORTEX_API_URL, CORTEX_API_KEY, and CORTEX_API_KEY_ID first.", file=sys.stderr)
         return 2
     try:
-        result = CortexXqlClient(base_url, api_key, api_key_id).run(build_query(args.container_id), relative_time_ms=args.relative_time_ms, limit=args.limit, tenant_id=os.getenv("CORTEX_TENANT_ID"), timeout=args.timeout, poll_interval=args.poll_interval)
+        result = CortexXqlClient(base_url, api_key, api_key_id).run(build_query(args.asset_name), relative_time_ms=args.relative_time_ms, limit=args.limit, tenant_id=os.getenv("CORTEX_TENANT_ID"), timeout=args.timeout, poll_interval=args.poll_interval)
     except CortexApiError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
