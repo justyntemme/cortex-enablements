@@ -7,11 +7,20 @@ Replace values in angle brackets before running a parameterized query.
 
 Source: `query_8_image_vulnerability_summary/main.py`
 
-This is the preferred inventory/dashboard query. Its first aggregation reduces
-duplicate package findings to one row per image/CVE and chooses the greatest
-CVSS score seen for that CVE. Its second aggregation creates one image object
-with a deduplicated `cves` array. This avoids duplicating Query 5's flat
-single-image retrieval.
+This is the preferred inventory/dashboard script. XQL reduces duplicate
+package findings to one row per image/CVE and chooses the greatest CVSS score
+seen for that CVE. The script then groups that single result set by image ID
+and emits a deduplicated `cves` array of `{id, severity_score}` objects.
+
+Nesting is deliberately performed after retrieval. The equivalent XQL
+`values(object_create(...))` aggregation timed out even when bounded to one
+image, while the deduplicating query below completes quickly. This is distinct
+from Query 5: Query 5 returns raw detailed findings for one image; Query 8
+returns minimal, deduplicated CVE rows for all images and produces the nested
+fleet response. When the result exceeds the inline API's 1,000-row maximum,
+the script follows the returned stream ID and reads the full result through
+`get_query_results_stream`. The script caps `--limit` at the XQL API maximum
+of 1,000,000 unique image/CVE rows and warns when that ceiling is reached.
 
 ```xql
 config case_sensitive = false
@@ -19,18 +28,77 @@ config case_sensitive = false
 | filter asset_category = "Container Image" and asset_type = "CORE_IMAGE"
 | filter asset_id != null and asset_name != null and vulnerability_id != null
 | comp max(cvss_score) as severity_score by asset_id, asset_name, vulnerability_id
-| comp count() as cve_count,
-       max(severity_score) as max_severity_score,
-       values(object_create("id", vulnerability_id, "severity_score", severity_score)) as cves
-  by asset_id, asset_name
-| fields asset_id as id, asset_name as image_digest, cve_count, max_severity_score, cves
-| sort desc cve_count
+| fields asset_id as id, asset_name as image_digest, vulnerability_id as cve_id, severity_score
+```
+
+The script's final JSON shape is:
+
+```json
+[
+  {
+    "id": "<CORTEX_IMAGE_ASSET_ID>",
+    "image_digest": "sha256:<DIGEST>",
+    "cve_count": 2,
+    "max_severity_score": 9.8,
+    "cves": [
+      {"id": "CVE-2026-1234", "severity_score": 8.1},
+      {"id": "CVE-2026-5678", "severity_score": 9.8}
+    ]
+  }
+]
 ```
 
 To bound Query 8 to one image, add this immediately after its second `filter`:
 
 ```xql
 | filter asset_name = "<IMAGE_DIGEST>"
+```
+
+## Query 9: batched image vulnerability stream for ETL
+
+Source: `query_9_batched_image_vulnerability_stream/main.py`
+
+Query 9 independently implements Query 8's output contract while leaving Query
+8 unchanged as the basic example. It divides the environment into 16 disjoint
+hexadecimal `asset_id` ranges, runs three XQL queries concurrently by default,
+and streams one complete image object per NDJSON line. Three workers leave one
+of Cortex's four public-API XQL query slots available for console activity.
+Before scheduling work, it checks the tenant's XQL quota and active-query
+count; existing activity further reduces its worker count. Concurrency
+rejections use bounded exponential backoff, and the final log reports the
+extraction's quota usage delta. Streamed rows are folded directly into their
+image objects rather than first retaining a second full list of result
+dictionaries in memory.
+
+Every shard uses the same absolute `from` and `to` timestamps. A shard reaching
+the configured result ceiling is not emitted; it is split into another 16
+prefixes and retried. This guarantees that an image is never divided between
+shards because all CVEs for an image share the same `asset_id`.
+
+```xql
+config case_sensitive = false
+| dataset = uvm_findings
+| filter asset_category = "Container Image" and asset_type = "CORE_IMAGE"
+| filter asset_id != null and asset_name != null and vulnerability_id != null
+| filter asset_id ~= "^(<HEX_PREFIX_1>|<HEX_PREFIX_2>|...)"
+| comp max(cvss_score) as severity_score by asset_id, asset_name, vulnerability_id
+| fields asset_id as id, asset_name as image_digest, vulnerability_id as cve_id, severity_score
+```
+
+Default ETL execution:
+
+```bash
+python3 query_9_batched_image_vulnerability_stream/main.py > image-vulnerabilities.ndjson
+```
+
+The script writes progress and its fixed snapshot timestamps to standard error.
+To retry one failed shard against the identical snapshot, reuse those timestamps:
+
+```bash
+python3 query_9_batched_image_vulnerability_stream/main.py \
+  --prefix a \
+  --from-ms <SNAPSHOT_FROM_MS> \
+  --to-ms <SNAPSHOT_TO_MS>
 ```
 
 ## Query 1: all hosts
@@ -92,22 +160,6 @@ Source: `query_5_vulnerabilities_by_image/main.py`
 ```xql
 dataset = uvm_findings
 | filter asset_name = "<IMAGE_NAME_OR_DIGEST>" and vulnerability_id != null
-| fields asset_name, vulnerability_id, cvss_score, cvss_severity, affected_software, package_version, package_type, os_distribution, file_path, first_observed, cve_publish_date, last_observed, fix_available, fix_versions, remediation, cortex_vulnerability_risk_score, exploitable, epss_score, cve_risk_factors, exploit_level
-| sort asc vulnerability_id
-| limit 1000
-```
-
-## Query 6: vulnerability findings for one container image
-
-Source: `query_6_vulnerabilities_by_container/main.py`
-
-Query 6 currently uses the same `uvm_findings` lookup as Query 5; its parameter
-name is container-oriented, but the filter value must still be the image name
-or digest stored in `asset_name`.
-
-```xql
-dataset = uvm_findings
-| filter asset_name = "<CONTAINER_IMAGE_NAME_OR_DIGEST>" and vulnerability_id != null
 | fields asset_name, vulnerability_id, cvss_score, cvss_severity, affected_software, package_version, package_type, os_distribution, file_path, first_observed, cve_publish_date, last_observed, fix_available, fix_versions, remediation, cortex_vulnerability_risk_score, exploitable, epss_score, cve_risk_factors, exploit_level
 | sort asc vulnerability_id
 | limit 1000
