@@ -148,3 +148,40 @@ config case_sensitive = true timeframe = 2d
   by asset_id, asset_name
 | alter returned_finding_count = array_length(findings)
 ```
+
+## 4. Kubernetes Pod Groups and Containers by Image Name
+
+```
+dataset = asset_inventory
+| filter xdm.asset.type.name = "Kubernetes Pod Group"
+| alter relations = json_extract_array(
+    xdm.asset.normalized_fields,
+    "$['xdm.asset.relations']"
+  )
+| arrayexpand relations
+| alter rel_type = json_extract_scalar(
+    relations, "$['xdm.asset.relation.type']"
+  ),
+  rel_asset_id = json_extract_scalar(
+    relations, "$['xdm.asset.relation.asset_id']"
+  ),
+  container_name = json_extract_scalar(
+    relations,
+    "$['xdm.asset.relation.metadata']['xdm.asset.relation.metadata.container_name']"
+  )
+| filter rel_type = "RUNS"
+| fields xdm.asset.id as pod_group_id,
+         xdm.asset.name as pod_group_name,
+         container_name,
+         rel_asset_id
+| join type = inner (
+    dataset = asset_inventory
+    | filter xdm.asset.type.id = "RUNTIME_IMAGE"
+    | filter xdm.asset.name = "imageName:imageVersion"
+    | fields xdm.asset.id as image_id,
+             xdm.asset.name as image_name
+  ) as images rel_asset_id = images.image_id
+| fields pod_group_id, pod_group_name, container_name,
+         images.image_id as image_id,
+         images.image_name as image_name
+```
