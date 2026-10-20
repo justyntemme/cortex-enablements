@@ -185,6 +185,41 @@ config case_sensitive = false
 | fields _time as state_observed_at, agent_id, agent_hostname, container_id, container_name, container_state as state, container_image_id as image_id, container_image_name as image_name, pod_name, pod_namespace, pod_uid, pod_ip, privileged
 ```
 
+**Alternative without regex (plain image IDs only):** Use this version when
+`actor_container_info.image_id` is exactly `sha256:<64 hex characters>`, with
+no runtime prefix or repository reference. Replace `<IMAGE_CONFIG_DIGEST>` with
+the complete config digest, including `sha256:`; this is not the Cortex asset
+ID. Exact equality will exclude prefixed values such as
+`docker://sha256:...` or `repository@sha256:...`.
+
+This version removes digest extraction and uses an early equality filter. It
+preserves the latest-observation selection and subsequent running-state filter.
+No performance improvement has been benchmarked. This is a copy/paste query
+alternative; the Python script above still generates the regex version.
+
+```xql
+config case_sensitive = false
+| dataset = xdr_data
+| filter actor_container_info != null
+| filter actor_container_info -> image_id = "<IMAGE_CONFIG_DIGEST>"
+| alter container_id = actor_container_info -> id,
+        container_name = actor_container_info -> name,
+        container_image_id = actor_container_info -> image_id,
+        container_image_name = actor_container_info -> image_name,
+        pod_name = actor_container_info -> pod_name,
+        pod_namespace = actor_container_info -> pod_namespace,
+        pod_uid = actor_container_info -> pod_uid,
+        privileged = actor_container_info -> privileged,
+        container_other = actor_container_info -> other
+| alter container_state = uppercase(coalesce(json_extract_scalar(container_other, "$.state"), json_extract_scalar(container_other, "$.State"))),
+        pod_ip = json_extract_scalar(container_other, "$.pod_ip")
+| filter container_id != null
+| fields _time, agent_id, agent_hostname, container_id, container_name, container_state, container_image_id, container_image_name, pod_name, pod_namespace, pod_uid, pod_ip, privileged
+| dedup agent_id, container_id by desc _time
+| filter container_state in ("CONTAINER_RUNNING", "RUNNING")
+| fields _time as state_observed_at, agent_id, agent_hostname, container_id, container_name, container_state as state, container_image_id as image_id, container_image_name as image_name, pod_name, pod_namespace, pod_uid, pod_ip, privileged
+```
+
 Run it with:
 
 ```bash
