@@ -7,48 +7,63 @@ Replace values in angle brackets before running a parameterized query.
 
 Source: `query_8_image_vulnerability_summary/main.py`
 
-This is the preferred inventory/dashboard script. XQL reduces duplicate
-package findings to one row per image/CVE and chooses the greatest CVSS score
-seen for that CVE. The script then groups that single result set by image ID
-and emits a deduplicated `cves` array of `{id, severity_score}` objects.
+This is the simple, single-query counterpart to Query 9. It projects raw
+package observations and groups them locally into the same image → CVE →
+`package_findings` structure. Every package retains its own score, description,
+risk, fix, and `cve_vendor_link` fields; there is no maximum-score CVE pivot.
+The latest observation of each package/advisory relationship wins, using
+`last_observed`, then `_time`, then `insert_time`. Exact repeats collapse;
+conflicting observations with equal timestamps remain distinct, as in Query 9.
 
-Nesting is deliberately performed after retrieval. The equivalent XQL
-`values(object_create(...))` aggregation timed out even when bounded to one
-image, while the deduplicating query below completes quickly. This is distinct
-from Query 5: Query 5 returns raw detailed findings for one image; Query 8
-returns minimal, deduplicated CVE rows for all images and produces the nested
-fleet response. When the result exceeds the inline API's 1,000-row maximum,
-the script follows the returned stream ID and reads the full result through
-`get_query_results_stream`. The script caps `--limit` at the XQL API maximum
-of 1,000,000 unique image/CVE rows and warns when that ceiling is reached.
+Query 8 retrieves one result set, follows a returned result-stream ID when
+needed, holds the results in memory, and prints a JSON array. It does not
+batch or manage quotas like Query 9. `--limit` counts raw package observations,
+not unique CVEs, and is capped at 1,000,000. Reaching it prints a warning:
+the output may omit images, CVEs, or package findings. Wider raw rows also
+increase transfer and memory requirements; use Query 9 for large ETL exports.
 
 ```xql
 config case_sensitive = false
 | dataset = uvm_findings
 | filter asset_category = "Container Image" and asset_type = "CORE_IMAGE"
 | filter asset_id != null and asset_name != null and vulnerability_id != null
-| comp max(cvss_score) as severity_score by asset_id, asset_name, vulnerability_id
-| fields asset_id as id, asset_name as image_digest, vulnerability_id as cve_id, severity_score
+| fields asset_id as id, asset_name as image_digest, vulnerability_id as cve_id,
+         package_purl, affected_software, package_version, package_type,
+         os_distribution, file_path, layer_id, finding_sources, cve_vendor_link,
+         cve_description, cvss_score, cvss_severity, fix_available, fix_versions,
+         remediation, cortex_vulnerability_risk_score, exploitable, epss_score,
+         first_observed, last_observed, _time, insert_time
 ```
 
-The script's final JSON shape is:
+The script's final JSON shape is (package fields abbreviated):
 
 ```json
 [
   {
     "id": "<CORTEX_IMAGE_ASSET_ID>",
     "image_digest": "sha256:<DIGEST>",
-    "cve_count": 2,
-    "max_severity_score": 9.8,
+    "cve_count": 1,
+    "package_finding_count": 2,
+    "max_severity_score": 9.1,
     "cves": [
-      {"id": "CVE-2026-1234", "severity_score": 8.1},
-      {"id": "CVE-2026-5678", "severity_score": 9.8}
+      {
+        "cve_id": "CVE-2026-1234",
+        "package_findings": [
+          {"affected_software": "openssl", "cvss_score": 7.5, "cve_vendor_link": "https://example.test/advisory"},
+          {"affected_software": "example", "cvss_score": 9.1, "cve_vendor_link": null}
+        ]
+      }
     ]
   }
 ]
 ```
 
-To bound Query 8 to one image, add this immediately after its second `filter`:
+This replaces the old `cves[].id` and `cves[].severity_score` contract with
+`cves[].cve_id` and `cves[].package_findings[].cvss_score`. Missing fields stay
+null. `max_severity_score` remains an image-level summary only.
+
+To bound Query 8 to one image, pass `--image-digest sha256:<DIGEST>` to the
+script, or add this immediately after the second XQL `filter`:
 
 ```xql
 | filter asset_name = "<IMAGE_DIGEST>"
@@ -58,8 +73,9 @@ To bound Query 8 to one image, add this immediately after its second `filter`:
 
 Source: `query_9_batched_image_vulnerability_stream/main.py`
 
-Query 9 independently implements Query 8's output contract while leaving Query
-8 unchanged as the basic example. It divides the environment into 16 disjoint
+Query 9 preserves package/CVE relationships and their actual `cvss_score` in
+`cves[].package_findings[]`, matching Query 8's basic output structure.
+It divides the environment into 16 disjoint
 hexadecimal `asset_id` ranges, runs three XQL queries concurrently by default,
 and streams one complete image object per NDJSON line. Three workers leave one
 of Cortex's four public-API XQL query slots available for console activity.
@@ -81,9 +97,21 @@ config case_sensitive = false
 | filter asset_category = "Container Image" and asset_type = "CORE_IMAGE"
 | filter asset_id != null and asset_name != null and vulnerability_id != null
 | filter asset_id ~= "^(<HEX_PREFIX_1>|<HEX_PREFIX_2>|...)"
-| comp max(cvss_score) as severity_score by asset_id, asset_name, vulnerability_id
-| fields asset_id as id, asset_name as image_digest, vulnerability_id as cve_id, severity_score
+| fields asset_id as id, asset_name as image_digest, vulnerability_id as cve_id,
+         package_purl, affected_software, package_version, package_type,
+         os_distribution, file_path, layer_id, finding_sources, cve_vendor_link,
+         cve_description, cvss_score, cvss_severity, fix_available, fix_versions,
+         remediation, cortex_vulnerability_risk_score, exploitable, epss_score,
+         first_observed, last_observed, _time, insert_time
 ```
+
+Python keeps the latest observation per image/CVE/package/source relationship,
+using `last_observed`, then `_time`, then `insert_time`. Equal-time conflicts
+remain distinct; exact repeats collapse. It never chooses a relationship score
+using `max()`. The existing root `max_severity_score` is only an image summary.
+The per-shard limit defaults to 100,000 raw observations because these records
+are wider than the previous CVE-only rows. See Query 9's README for full identity,
+output-contract, and scalability details.
 
 Default ETL execution:
 
@@ -100,6 +128,74 @@ python3 query_9_batched_image_vulnerability_stream/main.py \
   --from-ms <SNAPSHOT_FROM_MS> \
   --to-ms <SNAPSHOT_TO_MS>
 ```
+
+## Query 10: all running containers for one image ID
+
+Source: `query_10_running_containers_by_image/main.py`
+
+Query 10 accepts the Cortex image asset ID emitted in the `id` field by Queries
+8 and 9. It first resolves that one asset to its normalized config identifier,
+then puts the identifier into an early filter on XDR container telemetry. This
+two-stage keyed lookup avoids a broad join over a large `xdr_data` collection.
+The telemetry query keeps the newest event for each `(agent_id, container_id)`
+pair and then filters the real container state. Runtime state is read from the
+case-sensitive JSON path `actor_container_info.other.state`, with `State` as a
+provider-case fallback; it is not inferred from the asset's `last_observed`
+timestamp.
+
+First resolve the Cortex image asset ID:
+
+```xql
+config case_sensitive = false
+| dataset = asset_inventory
+| filter xdm.asset.id = "<CORTEX_IMAGE_ASSET_ID>"
+| fields xdm.asset.id as image_asset_id,
+         xdm.asset.type.id as image_asset_type,
+         xdm.image.identifier as image_identifier,
+         xdm.asset.name as image_asset_name,
+         xdm.asset.strong_id as image_strong_id
+| limit 2
+```
+
+Then replace `<IMAGE_CONFIG_DIGEST>` below with the returned
+`image_identifier`:
+
+```xql
+config case_sensitive = false
+| dataset = xdr_data
+| filter actor_container_info != null
+| filter actor_container_info -> image_id contains "<IMAGE_CONFIG_DIGEST>"
+| alter container_id = actor_container_info -> id,
+        container_name = actor_container_info -> name,
+        container_image_id = actor_container_info -> image_id,
+        container_image_name = actor_container_info -> image_name,
+        pod_name = actor_container_info -> pod_name,
+        pod_namespace = actor_container_info -> pod_namespace,
+        pod_uid = actor_container_info -> pod_uid,
+        privileged = actor_container_info -> privileged,
+        container_other = actor_container_info -> other
+| alter container_state = uppercase(coalesce(json_extract_scalar(container_other, "$.state"), json_extract_scalar(container_other, "$.State"))),
+        container_image_identifier = lowercase(arrayindex(regextract(container_image_id, "(sha256:[0-9a-f]{64})"), 0)),
+        pod_ip = json_extract_scalar(container_other, "$.pod_ip")
+| filter container_image_identifier != null and container_id != null
+| filter container_image_identifier = "<IMAGE_CONFIG_DIGEST>"
+| fields _time, agent_id, agent_hostname, container_id, container_name, container_state, container_image_id, container_image_name, pod_name, pod_namespace, pod_uid, pod_ip, privileged
+| dedup agent_id, container_id by desc _time
+| filter container_state in ("CONTAINER_RUNNING", "RUNNING")
+| fields _time as state_observed_at, agent_id, agent_hostname, container_id, container_name, container_state as state, container_image_id as image_id, container_image_name as image_name, pod_name, pod_namespace, pod_uid, pod_ip, privileged
+```
+
+Run it with:
+
+```bash
+python3 query_10_running_containers_by_image/main.py \
+  --image-id <CORTEX_IMAGE_ASSET_ID>
+```
+
+The script also accepts `sha256:<CONFIG_DIGEST>` and skips the asset-resolution
+query. The default telemetry window is 24 hours; adjust `--relative-time-ms`
+when a quiet workload requires a wider window. Only containers represented in
+`xdr_data` during that window can be returned.
 
 ## Query 1: all hosts
 
